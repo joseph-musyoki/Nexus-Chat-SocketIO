@@ -1,5 +1,5 @@
 // 1. Imports
-import dotenv from 'dotenv';
+import 'dotenv/config';
 import express from 'express';
 import http from 'http';
 import cors from 'cors';
@@ -12,8 +12,6 @@ import userRoutes from './routes/userRoutes.js';
 import groupRoutes from './routes/groupRoutes.js';
 import messageRoutes from './routes/messageRoutes.js';
 
-// 2. Configuration
-dotenv.config();
 
 // 3. Declarations
 const app = express();

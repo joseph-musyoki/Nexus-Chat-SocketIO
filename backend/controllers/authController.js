@@ -1,16 +1,55 @@
 // 1. Imports
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import User from '../models/User.js';
+import { Readable } from 'stream';
 
-// 2. Register Controller
+import User from '../models/User.js';
+import cloudinary from '../config/cloudinary.js';
+
+// Upload image to Cloudinary
+const uploadToCloudinary = (buffer) => {
+    return new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+            {
+                folder: 'nexus-chat/profiles',
+                transformation: [
+                    { width: 400, height: 400, crop: 'fill' }
+                ]
+            },
+            (error, result) => {
+                if (error) {
+                    return reject(error);
+                }
+
+                resolve(result);
+            }
+        );
+
+        Readable.from(buffer).pipe(stream);
+    });
+};
+// Register Controller
 export const register = async (req, res) => {
     try {
         const { username, email, password } = req.body;
 
-        // Check if user already exists
+        if (!username || !email || !password) {
+            return res.status(400).json({
+                message: 'Username, email and password are required'
+            });
+        }
+
+        if (password.length < 8) {
+            return res.status(400).json({
+                message: 'Password must contain at least 8 characters'
+            });
+        }
+
         const existingUser = await User.findOne({
-            $or: [{ email }, { username }]
+            $or: [
+                { email: email.toLowerCase() },
+                { username }
+            ]
         });
 
         if (existingUser) {
@@ -19,17 +58,25 @@ export const register = async (req, res) => {
             });
         }
 
-        // Hash password
         const hashedPassword = await bcrypt.hash(password, 12);
 
-        // Create user
+        let profilePicture = '';
+
+        if (req.file) {
+            const uploadedImage = await uploadToCloudinary(
+                req.file.buffer
+            );
+
+            profilePicture = uploadedImage.secure_url;
+        }
+
         const user = await User.create({
             username,
             email,
-            password: hashedPassword
+            password: hashedPassword,
+            profilePicture
         });
 
-        // Generate JWT
         const token = jwt.sign(
             { id: user._id },
             process.env.JWT_SECRET,
@@ -48,9 +95,10 @@ export const register = async (req, res) => {
         });
 
     } catch (error) {
+        console.error('Registration error:', error);
+
         return res.status(500).json({
-            message: 'Registration failed',
-            error: error.message
+            message: 'Registration failed'
         });
     }
 };

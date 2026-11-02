@@ -1,6 +1,7 @@
 // 1. Imports
 import { Server } from 'socket.io';
 import jwt from 'jsonwebtoken';
+import mongoose from 'mongoose';
 
 import User from '../models/User.js';
 import Group from '../models/Group.js';
@@ -46,128 +47,182 @@ const initializeSocket = (server) => {
     // 4. Socket Connections
     io.on('connection', async (socket) => {
 
-        const userId = socket.user._id.toString();
+    const userId = socket.user._id.toString();
 
-        console.log(`${socket.user.username} connected`);
+    console.log(`${socket.user.username} connected`);
 
-        // Join personal room
-        socket.join(`user:${userId}`);
+    // 1. Join personal room
+    socket.join(`user:${userId}`);
 
-        // Join rooms for groups the user belongs to
+    // 2. Join existing group rooms
+    try {
+        const groups = await Group.find({
+            members: socket.user._id
+        }).select('_id');
+
+        groups.forEach((group) => {
+            socket.join(`group:${group._id}`);
+        });
+
+    } catch (error) {
+        console.error('Failed to join group rooms:', error.message);
+    }
+
+    // 3. Dynamically join newly created or selected groups
+    socket.on('join_group', async (data, callback) => {
         try {
-            const groups = await Group.find({
-                members: socket.user._id
-            }).select('_id');
+            const { groupId } = data || {};
 
-            groups.forEach((group) => {
-                socket.join(`group:${group._id}`);
+            if (!groupId) {
+                return callback?.({
+                    success: false,
+                    message: 'Group ID is required'
+                });
+            }
+
+            const group = await Group.findOne({
+                _id: groupId,
+                members: socket.user._id
+            });
+
+            if (!group) {
+                return callback?.({
+                    success: false,
+                    message: 'You are not a member of this group'
+                });
+            }
+
+            socket.join(`group:${group._id}`);
+
+            console.log(`${socket.user.username} joined group: ${group.name}`);
+
+            callback?.({
+                success: true,
+                message: 'Joined group successfully'
             });
 
         } catch (error) {
-            console.error('Failed to join group rooms:', error.message);
+            console.error('Join group error:', error.message);
+
+            callback?.({
+                success: false,
+                message: 'Unable to join group'
+            });
+        }
+    });
+
+    // 4. Send Message
+socket.on('send_message', async (data, callback) => {
+    try {
+        const {
+            receiver,
+            groupId,
+            content,
+            messageType
+        } = data || {};
+
+        // Validate message content
+        if (!content || !content.trim()) {
+            return callback?.({
+                success: false,
+                message: 'Message cannot be empty.'
+            });
         }
 
-        // 5. Send Message
-        socket.on('send_message', async (data, callback) => {
-            try {
-                const {
-                    receiver,
-                    groupId,
-                    content,
-                    messageType
-                } = data;
+        if (content.length > 5000) {
+            return callback?.({
+                success: false,
+                message: 'Message is too long.'
+            });
+        }
 
-                if (
-                    typeof content !== 'string' ||
-                    !content.trim() ||
-                    content.length > 5000
-                ) {
-                    return callback?.({
-                        success: false,
-                        message: 'Invalid message content'
-                    });
-                }
+        if (!['private', 'group'].includes(messageType)) {
+            return callback?.({
+                success: false,
+                message: 'Invalid message type.'
+            });
+        }
 
-                if (!['private', 'group'].includes(messageType)) {
-                    return callback?.({
-                        success: false,
-                        message: 'Invalid message type'
-                    });
-                }
+        let messageData = {
+            sender: socket.user._id,
+            content: content.trim(),
+            messageType
+        };
 
-                const messageData = {
-                    sender: socket.user._id,
-                    content: content.trim(),
-                    messageType
-                };
-
-                if (messageType === 'private') {
-
-                    if (!receiver) {
-                        return callback?.({
-                            success: false,
-                            message: 'Recipient is required'
-                        });
-                    }
-
-                    const recipient = await User.findById(receiver);
-
-                    if (!recipient) {
-                        return callback?.({
-                            success: false,
-                            message: 'Recipient not found'
-                        });
-                    }
-
-                    messageData.receiver = recipient._id;
-
-                } else {
-
-                    if (!groupId) {
-                        return callback?.({
-                            success: false,
-                            message: 'Group ID is required'
-                        });
-                    }
-
-                    const group = await Group.findOne({
-                        _id: groupId,
-                        members: socket.user._id
-                    });
-
-                    if (!group) {
-                        return callback?.({
-                            success: false,
-                            message: 'You are not a member of this group'
-                        });
-                    }
-
-                    messageData.groupId = group._id;
-                }
-
-                const message = await Message.create(messageData);
-
-                callback?.({
-                    success: true,
-                    message: 'Message saved successfully',
-                    data: message
-                });
-
-            } catch (error) {
-                console.error('Message error:', error.message);
-
-                callback?.({
+        // Private message validation
+        if (messageType === 'private') {
+            if (!receiver || !mongoose.Types.ObjectId.isValid(receiver)) {
+                return callback?.({
                     success: false,
-                    message: 'Failed to send message'
+                    message: 'Valid recipient is required.'
                 });
             }
+
+            const recipient = await User.findById(receiver);
+
+            if (!recipient) {
+                return callback?.({
+                    success: false,
+                    message: 'Recipient not found.'
+                });
+            }
+
+            messageData.receiver = recipient._id;
+        }
+
+        // Group message validation
+        if (messageType === 'group') {
+            if (!groupId || !mongoose.Types.ObjectId.isValid(groupId)) {
+                return callback?.({
+                    success: false,
+                    message: 'Valid group ID is required.'
+                });
+            }
+
+            const group = await Group.findOne({
+                _id: groupId,
+                members: socket.user._id
+            });
+
+            if (!group) {
+                return callback?.({
+                    success: false,
+                    message: 'You are not a member of this group.'
+                });
+            }
+
+            messageData.groupId = group._id;
+        }
+
+        // Save message to MongoDB
+        const message = await Message.create(messageData);
+
+        console.log('Message saved:', message._id);
+
+        callback?.({
+            success: true,
+            message: 'Message sent successfully.',
+            data: message
         });
 
-        // 6. Disconnect
-        socket.on('disconnect', () => {
-            console.log(`${socket.user.username} disconnected`);
+        // MongoDB Change Stream handles broadcasting.
+        // Do not emit new_message here.
+
+    } catch (error) {
+        console.error('Send message error:', error);
+
+        callback?.({
+            success: false,
+            message: 'Unable to send message.'
         });
+    }
+});
+
+    // 5. Disconnect
+    socket.on('disconnect', () => {
+        console.log(`${socket.user.username} disconnected`);
     });
+});
 
     // 7. MongoDB Change Stream
     const messageStream = Message.watch([], {
